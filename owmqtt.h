@@ -19,6 +19,7 @@
 #ifndef _OWMQTT_H_
 #define _OWMQTT_H_
 
+/* Constants */
 #define DEFAULT_OWFS_PARAMS     "-u -f fic"
 #define DEFAULT_POLLING         (10)
 
@@ -39,5 +40,21 @@
 #define FALSE  (0)
 #endif
 
+
+
+// ------- Logging ---------
+
+#define OWMQTT_DEBUG  (2)
+#define OWMQTT_INFO   (4)
+#define OWMQTT_ERROR  (8)
+
+#define owmqtt_debug( ... ) \
+    owmqtt_log(OWMQTT_DEBUG, __VA_ARGS__ )
+
+#define owmqtt_info( ... ) \
+    owmqtt_log(OWMQTT_INFO, __VA_ARGS__ )
+
+#define owmqtt_error( ... ) \
+    owmqtt_log(OWMQTT_ERROR, __VA_ARGS__ )
 
 #endif

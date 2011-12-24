@@ -26,6 +26,7 @@
 #include <signal.h>
 #include <ctype.h>
 #include <time.h>
+#include <stdarg.h>
 
 #include <owcapi.h>
 #include <mosquitto.h>
@@ -40,6 +41,7 @@ struct mosquitto *mosq = NULL;
 int keep_running = TRUE;
 int mqtt_connected = FALSE;
 int debug = TRUE;
+int exit_code = EXIT_SUCCESS;
 
 // Configurable parameters
 const char *owfs_params = DEFAULT_OWFS_PARAMS;
@@ -53,12 +55,39 @@ int mqtt_keepalive = DEFAULT_MQTT_KEEPALIVE;
 
 
 
+
+static void owmqtt_log(int level, const char *fmt, ...)
+{
+  va_list args;
+
+  if (level == OWMQTT_DEBUG && !debug)
+      return;
+
+  // Display the message
+  va_start(args, fmt);
+  vprintf(fmt, args);
+  printf("\n");
+  va_end(args);
+
+  if (level == OWMQTT_ERROR) {
+    // Exit with a non-zero exit code if there was a fatal error
+    exit_code++;
+    if (keep_running) {
+      // Quit gracefully
+      keep_running = FALSE;
+    } else {
+      fprintf(stderr, "Error while quiting; exiting immediately.\n");
+      exit(-1);
+    }
+  }
+}
+
 static void termination_handler(int signum)
 {
     switch(signum) {
-        case SIGHUP:  fprintf(stderr, PACKAGE_NAME ": Received SIGHUP, exiting.\n"); break;
-        case SIGTERM: fprintf(stderr, PACKAGE_NAME ": Received SIGTERM, exiting.\n"); break;
-        case SIGINT:  fprintf(stderr, PACKAGE_NAME ": Received SIGINT, exiting.\n"); break;
+        case SIGHUP:  owmqtt_info(PACKAGE_NAME ": Received SIGHUP, exiting."); break;
+        case SIGTERM: owmqtt_info(PACKAGE_NAME ": Received SIGTERM, exiting."); break;
+        case SIGINT:  owmqtt_info(PACKAGE_NAME ": Received SIGINT, exiting."); break;
     }
 
     keep_running = FALSE;
@@ -100,13 +129,13 @@ static void publish_property(const char* node, const char* property)
     }
 
     snprintf(mqtt_path, MAX_PATH_LEN, "%s/%s%s", mqtt_prefix, node, property);
-    if (debug)
-        printf("%s = %s\n", mqtt_path, value);
+    owmqtt_debug("%s = %s", mqtt_path, value);
 
     // Publish
     res = mosquitto_publish(mosq, NULL, mqtt_path, strlen(value), (uint8_t *)value, mqtt_qos, mqtt_retain);
     if(res){
-        fprintf(stderr, "Error: Publish returned %d, disconnecting.\n", res);
+        // FIXME: deal with this better
+        owmqtt_error("Error while publishing, disconnecting.", res);
         mosquitto_disconnect(mosq);
     }
 
@@ -158,41 +187,40 @@ static void scan_bus()
     free(buf);
 }
 
-static void mqtt_connect_callback(void *obj, int result)
+static void owmqtt_connect_callback(void *obj, int result)
 {
     if(!result){
-        printf("Connected to MQTT server.\n");
+        owmqtt_info("Connected to MQTT server.");
         mqtt_connected = TRUE;
     } else {
         switch(result) {
             case 0x01:
-                fprintf(stderr, "Connection Refused: unacceptable protocol version\n");
+                owmqtt_error("Connection Refused: unacceptable protocol version\n");
                 break;
             case 0x02:
-                fprintf(stderr, "Connection Refused: identifier rejected\n");
+                owmqtt_error("Connection Refused: identifier rejected\n");
                 break;
             case 0x03:
                 // FIXME: if broker is unavailable, sleep and try connecting again
-                fprintf(stderr, "Connection Refused: broker unavailable\n");
+                owmqtt_error("Connection Refused: broker unavailable\n");
                 break;
             case 0x04:
-                fprintf(stderr, "Connection Refused: bad user name or password\n");
+                owmqtt_error("Connection Refused: bad user name or password\n");
                 break;
             case 0x05:
-                fprintf(stderr, "Connection Refused: not authorised\n");
+                owmqtt_error("Connection Refused: not authorised\n");
                 break;
             default:
-                fprintf(stderr, "Connection Refused: unknown reason\n");
+                owmqtt_error("Connection Refused: unknown reason\n");
                 break;
         }
 
         mqtt_connected = FALSE;
-        keep_running = FALSE;
     }
 }
 
 
-static void mqtt_disconnect_callback(void *obj)
+static void owmqtt_disconnect_callback(void *obj)
 {
     mqtt_connected = FALSE;
 
@@ -208,23 +236,25 @@ static struct mosquitto * initialise_mqtt(const char* id)
 
     mosq = mosquitto_new(id, NULL);
     if (!mosq) {
-        fprintf(stderr, "Error: failed to initialise MQTT client.\n");
+        owmqtt_error("Failed to initialise MQTT client.");
         return NULL;
     }
 
     if (debug) {
-        mosquitto_log_init(mosq, MOSQ_LOG_DEBUG | MOSQ_LOG_ERR | MOSQ_LOG_WARNING
-                               | MOSQ_LOG_NOTICE | MOSQ_LOG_INFO, MOSQ_LOG_STDERR);
+        mosquitto_log_init(mosq, MOSQ_LOG_DEBUG | MOSQ_LOG_NOTICE | MOSQ_LOG_INFO |
+                                 MOSQ_LOG_WARNING | MOSQ_LOG_ERR, MOSQ_LOG_STDOUT);
     }
 
     // FIXME: add support for username and password
 
-    mosquitto_connect_callback_set(mosq, mqtt_connect_callback);
-    mosquitto_disconnect_callback_set(mosq, mqtt_disconnect_callback);
+    mosquitto_connect_callback_set(mosq, owmqtt_connect_callback);
+    mosquitto_disconnect_callback_set(mosq, owmqtt_disconnect_callback);
 
+    owmqtt_info("Connecting to %s:%d...", mqtt_host, mqtt_port);
     res = mosquitto_connect(mosq, mqtt_host, mqtt_port, mqtt_keepalive, 1);
     if (res) {
-        fprintf(stderr, "Unable to connect (%d).\n", res);
+        owmqtt_error("Unable to connect (%d).", res);
+        mosquitto_destroy(mosq);
         return NULL;
     }
 
@@ -240,6 +270,7 @@ int main(int argc, char *argv[])
     // Make stdout unbuffered for logging/debugging
     setbuf(stdout, NULL);
 
+
     // Parse Switches
     /*
     while ((opt = getopt(argc, argv, "Dh")) != -1) {
@@ -253,11 +284,17 @@ int main(int argc, char *argv[])
 
     // Initialise libmosquitto
     mosquitto_lib_init();
+    if (debug) {
+        int major, minor, revision;
+        mosquitto_lib_version(&major, &minor, &revision);
+        owmqtt_debug("libmosquitto version: %d.%d.%d", major, minor, revision);
+    }
 
     // Initialise owfs
     res = OW_init(owfs_params);
     if (res) {
-        return res;
+        owmqtt_error("Failed to initialise owfs");
+        goto cleanup;
     }
 
     OW_set_error_print("2");
@@ -267,6 +304,10 @@ int main(int argc, char *argv[])
     // Create MQTT client
     // FIXME: get the client id from OW
     mosq = initialise_mqtt(PACKAGE_NAME);
+    if (!mosq) {
+        owmqtt_error("Failed to initialise MQTT client");
+        goto cleanup;
+    }
 
     // Setup signal handlers - so we exit cleanly
     signal(SIGTERM, termination_handler);
@@ -292,16 +333,15 @@ int main(int argc, char *argv[])
         // FIXME: check for errors
     }
 
-    // Clean up
-    printf("Cleaning up.\n");
-    OW_finish();
+cleanup:
+    owmqtt_debug("Cleaning up.");
 
     // Disconnect from MQTT server
-    if (mosq)
-        mosquitto_destroy(mosq);
-
+    if (mosq) mosquitto_destroy(mosq);
     mosquitto_lib_cleanup();
 
-    // FIXME: return non-zero if something went wrong
-    return 0;
+    OW_finish();
+
+    // exit_code is non-zero if something went wrong
+    return exit_code;
 }
