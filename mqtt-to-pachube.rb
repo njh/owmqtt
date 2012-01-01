@@ -2,23 +2,24 @@
 
 require 'rubygems'
 require 'mqtt/client'
+require 'net/http'
 require 'json'
 
 
 raise "Error: PACHUBE_API_KEY is not set" if ENV['PACHUBE_API_KEY'].nil? 
 
 def update_datastream_value(feed, datastream, value)
-  result = system(
-    'curl', '--silent',
-    '--output', '/dev/null',
-    '--request', 'PUT',
-    '--data-binary', {'current_value' => value}.to_json,
-    '--header', 'Accept: application/json',
-    '--header', 'Content-Type: application/json',
-    '--header', 'X-PachubeApiKey: ' + ENV['PACHUBE_API_KEY'],
-    "http://api.pachube.com/v2/feeds/#{feed}/datastreams/#{datastream}"
-  )
-  puts " * OK" if result
+  uri = URI.parse("http://api.pachube.com/v2/feeds/#{feed}/datastreams/#{datastream}")
+
+  response = Net::HTTP.start(uri.host, uri.port) do |http|
+    req = Net::HTTP::Put.new(uri.request_uri)
+    req['X-PachubeApiKey'] = ENV['PACHUBE_API_KEY']
+    req['Content-Type'] = 'application/json'
+    req.body = {'current_value' => value}.to_json
+    http.request(req)
+  end
+
+  puts " * #{response.message}"
 end
 
 
