@@ -23,6 +23,10 @@ def update_datastream_value(feed, datastream, value)
 end
 
 
+# Make STDOUT unbuffered, so that it appears in the log immediately
+STDOUT.sync = true
+
+
 client = MQTT::Client.new('localhost')
 client.connect do
   client.subscribe('/1wire/#')
