@@ -9,9 +9,13 @@ AM_INIT_AUTOMAKE
 AC_PROG_CC
 AC_PROG_INSTALL
 
-# Checks for libraries
+# Check for libraries
 AC_CHECK_LIB([owcapi], [OW_init],, AC_ERROR([Misssing owfs library]))
 AC_CHECK_LIB([mosquitto], [mosquitto_lib_init],, AC_ERROR([Misssing mosquitto client library]))
+
+# Check for functions
+AC_CHECK_FUNC([mosquitto_connack_string],, AC_ERROR([Misssing the mosquitto_connack_string function]))
+AC_CHECK_FUNC([mosquitto_log_callback_set],, AC_ERROR([Misssing the mosquitto_log_callback_set function]))
 
 # Check for headers
 AC_CHECK_HEADERS([owcapi.h], [], [AC_ERROR([Missing owfs header file])])

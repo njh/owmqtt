@@ -1,6 +1,6 @@
 /*
     OQMQTT - 1-wire to MQTT bridge
-    Copyright (C) 2011 Nicholas J Humfrey <njh@aelius.com>
+    Copyright (C) 2011-2012 Nicholas J Humfrey <njh@aelius.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -28,6 +28,9 @@
 #include <time.h>
 #include <stdarg.h>
 
+#include <sys/types.h>
+#include <regex.h>
+
 #include <owcapi.h>
 #include <mosquitto.h>
 
@@ -54,7 +57,20 @@ int mqtt_retain = DEFAULT_MQTT_RETAIN;
 int mqtt_keepalive = DEFAULT_MQTT_KEEPALIVE;
 
 
-
+// Paths on OWFS to ignore (not publish)
+regex_t *ignore_regexs;
+size_t ignore_count;
+const char* ignore_paths[] = {
+  "^/alarm/",
+  "^/bus\\.",
+  "^/settings/",
+  "^/simultaneous/",
+  "^/statistics/",
+  "^/structure/",
+  "^/system/",
+  "^/uncached/",
+  NULL
+};
 
 static void owmqtt_log(int level, const char *fmt, ...)
 {
@@ -106,16 +122,14 @@ static void usage()
 */
 
 
-static void publish_property(const char* node, const char* property)
+static void owmqtt_publish(const char* path)
 {
-    char path[MAX_PATH_LEN];
     char mqtt_path[MAX_PATH_LEN];
     size_t buf_len = 0;
     char *buf = NULL, *value = NULL;
     int res = -1;
 
     // Fetch the value
-    snprintf(path, MAX_PATH_LEN, "/%s%s", node, property);
     res = OW_get(path, &buf, &buf_len);
     if (res <= 0) {
         // FIXME: report error
@@ -128,11 +142,11 @@ static void publish_property(const char* node, const char* property)
         value++;
     }
 
-    snprintf(mqtt_path, MAX_PATH_LEN, "%s/%s%s", mqtt_prefix, node, property);
+    snprintf(mqtt_path, MAX_PATH_LEN, "%s%s", mqtt_prefix, path);
     owmqtt_debug("%s = %s", mqtt_path, value);
 
     // Publish
-    res = mosquitto_publish(mosq, NULL, mqtt_path, strlen(value), (uint8_t *)value, mqtt_qos, mqtt_retain);
+    res = mosquitto_publish(mosq, NULL, mqtt_path, strlen(value), value, mqtt_qos, mqtt_retain);
     if(res){
         // FIXME: deal with this better
         owmqtt_error("Error while publishing, disconnecting.", res);
@@ -142,85 +156,67 @@ static void publish_property(const char* node, const char* property)
     free(buf);
 }
 
-static void process_node(const char* node)
+
+static char owmqtt_check_ignore(const char *path)
 {
-    char *ptr, *property, *buf = NULL;
-    size_t buf_len = 0;
-    int res = -1;
+  int i;
+  
+  for(i=0; i< ignore_count; i++) {
+    int res = regexec(&ignore_regexs[i], path, 0, NULL, 0);
+    if (res==0) return TRUE;
+  }
 
-    res = OW_get(node, &buf, &buf_len);
-    if (res <= 0) {
-        // FIXME: report error
-        return;
-    }
-
-    ptr = buf;
-    while ((property = strsep(&ptr, ",")) != NULL) {
-        // FIXME: add support for other properties
-        if (strcmp(property, "temperature")==0) {
-            publish_property(node, property);
-        }
-    }
-
-    free(buf);
+  return FALSE;
 }
 
-static void scan_bus()
+static void owmqtt_process_node(const char *path)
 {
     char *ptr, *node, *buf = NULL;
     size_t buf_len = 0;
+    size_t path_len = strlen(path);
     int res = -1;
 
-    res = OW_get("/", &buf, &buf_len);
+    res = OW_get(path, &buf, &buf_len);
     if (res <= 0) {
         // FIXME: report error
         return;
     }
 
-    ptr = buf;
-    while ((node = strsep(&ptr, ",")) != NULL) {
-        if (strlen(node) > 13) {
-            process_node(node);
+    for(ptr = buf; (node = strsep(&ptr, ",")) != NULL; ) {
+        size_t newlen = strlen(node) + path_len + 1;
+        char *newpath = malloc(newlen);
+        snprintf(newpath, newlen, "%s%s", path, node);
+
+        if (owmqtt_check_ignore(newpath) == FALSE) {
+          if (newpath[newlen-2] == '/') {
+            owmqtt_process_node(newpath);
+          } else {
+            owmqtt_publish(newpath);
+          }
         }
+        
+        free(newpath);
     }
 
     free(buf);
 }
 
-static void owmqtt_connect_callback(void *obj, int result)
-{
-    if(!result){
-        owmqtt_info("Connected to MQTT server.");
-        mqtt_connected = TRUE;
-    } else {
-        switch(result) {
-            case 0x01:
-                owmqtt_error("Connection Refused: unacceptable protocol version\n");
-                break;
-            case 0x02:
-                owmqtt_error("Connection Refused: identifier rejected\n");
-                break;
-            case 0x03:
-                // FIXME: if broker is unavailable, sleep and try connecting again
-                owmqtt_error("Connection Refused: broker unavailable\n");
-                break;
-            case 0x04:
-                owmqtt_error("Connection Refused: bad user name or password\n");
-                break;
-            case 0x05:
-                owmqtt_error("Connection Refused: not authorised\n");
-                break;
-            default:
-                owmqtt_error("Connection Refused: unknown reason\n");
-                break;
-        }
 
-        mqtt_connected = FALSE;
-    }
+
+static void owmqtt_connect_callback(struct mosquitto *mosq, void *obj, int rc)
+{
+  if(!rc){
+    owmqtt_info("Connected to MQTT server.\n");
+    mqtt_connected = 1;
+  } else {
+    const char *str = mosquitto_connack_string(rc);
+    owmqtt_error("Connection Refused: %s\n", str);
+    mqtt_connected = 0;
+  }
 }
 
 
-static void owmqtt_disconnect_callback(void *obj)
+static void owmqtt_disconnect_callback(struct mosquitto *mosq, void *obj, int rc)
 {
     mqtt_connected = FALSE;
 
@@ -228,30 +224,31 @@ static void owmqtt_disconnect_callback(void *obj)
     // FIXME: keep count of re-connects
 }
 
+static void owmqtt_log_callback(struct mosquitto *mosq, void *obj, int level, const char *str)
+{
+    // FIXME: use the log level
+    printf("LOG: %s\n", str);
+}
 
-static struct mosquitto * initialise_mqtt(const char* id)
+static struct mosquitto * owmqtt_initialise_mqtt(const char* id)
 {
     struct mosquitto *mosq = NULL;
     int res = 0;
 
-    mosq = mosquitto_new(id, NULL);
+    mosq = mosquitto_new(id, true, NULL);
     if (!mosq) {
         owmqtt_error("Failed to initialise MQTT client.");
         return NULL;
     }
 
-    if (debug) {
-        mosquitto_log_init(mosq, MOSQ_LOG_DEBUG | MOSQ_LOG_NOTICE | MOSQ_LOG_INFO |
-                                 MOSQ_LOG_WARNING | MOSQ_LOG_ERR, MOSQ_LOG_STDOUT);
-    }
-
     // FIXME: add support for username and password
 
+    mosquitto_log_callback_set(mosq, owmqtt_log_callback);
     mosquitto_connect_callback_set(mosq, owmqtt_connect_callback);
     mosquitto_disconnect_callback_set(mosq, owmqtt_disconnect_callback);
 
     owmqtt_info("Connecting to %s:%d...", mqtt_host, mqtt_port);
-    res = mosquitto_connect(mosq, mqtt_host, mqtt_port, mqtt_keepalive, 1);
+    res = mosquitto_connect(mosq, mqtt_host, mqtt_port, mqtt_keepalive);
     if (res) {
         owmqtt_error("Unable to connect (%d).", res);
         mosquitto_destroy(mosq);
@@ -259,6 +256,25 @@ static struct mosquitto * initialise_mqtt(const char* id)
     }
 
     return mosq;
+}
+
+static void owmqtt_regex_init()
+{
+    int i;
+    
+    for(i=0; ignore_paths[i]; i++);
+    ignore_count = i;
+    owmqtt_debug("ignore_count=%d", ignore_count);
+    
+    // Allocate memory for the regular experssions
+    ignore_regexs = (regex_t*)malloc(sizeof(regex_t) * ignore_count);
+    // FIXME: check for error
+    
+    for(i=0; i<ignore_count; i++) {
+      int res = regcomp(&ignore_regexs[i], ignore_paths[i], REG_EXTENDED | REG_NOSUB);
+      // FIXME: check for error
+      owmqtt_debug("Compiling %s=%d", ignore_paths[i], res);
+    }
 }
 
 int main(int argc, char *argv[])
@@ -281,6 +297,9 @@ int main(int argc, char *argv[])
         }
     }
     */
+    
+    // Compile the regular expressions
+    owmqtt_regex_init();
 
     // Initialise libmosquitto
     mosquitto_lib_init();
@@ -303,7 +322,7 @@ int main(int argc, char *argv[])
 
     // Create MQTT client
     // FIXME: get the client id from OW
-    mosq = initialise_mqtt(PACKAGE_NAME);
+    mosq = owmqtt_initialise_mqtt(PACKAGE_NAME);
     if (!mosq) {
         owmqtt_error("Failed to initialise MQTT client");
         goto cleanup;
@@ -322,14 +341,14 @@ int main(int argc, char *argv[])
 
         // Is it time to scan the bus again?
         if (time(NULL) >= next_scan && mqtt_connected) {
-            scan_bus();
+            owmqtt_process_node("/");
             next_scan += polling_interval;
         }
 
         // FIXME: check that we can keep-up
 
         // Wait for network packets for a maximum of 0.5s
-        res = mosquitto_loop(mosq, 500);
+        res = mosquitto_loop(mosq, 500, 1);
         // FIXME: check for errors
     }
 
@@ -341,6 +360,8 @@ cleanup:
     mosquitto_lib_cleanup();
 
     OW_finish();
+    
+    // FIXME: call regfree() on each of the regular expressions
 
     // exit_code is non-zero if something went wrong
     return exit_code;

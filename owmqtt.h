@@ -1,6 +1,6 @@
 /*
     OQMQTT - 1-wire to MQTT bridge
-    Copyright (C) 2011 Nicholas J Humfrey <njh@aelius.com>
+    Copyright (C) 2011-2012 Nicholas J Humfrey <njh@aelius.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,7 +24,7 @@
 #define DEFAULT_POLLING         (10)
 
 #define DEFAULT_MQTT_PREFIX     "/1wire"
-#define DEFAULT_MQTT_HOST       "localhost"
+#define DEFAULT_MQTT_HOST       "mqtt.aelius.co.uk"
 #define DEFAULT_MQTT_PORT       (1883)
 #define DEFAULT_MQTT_QOS        (0)
 #define DEFAULT_MQTT_RETAIN     (1)
